@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM --platform=$TARGETPLATFORM centos:centos7.9.2009 AS build
+FROM --platform=$TARGETPLATFORM docker.io/bitnami/minideb:bookworm AS build
+#FROM --platform=$TARGETPLATFORM centos:centos7.9.2009 AS build
 ARG VERSION=3.0.11
 ARG TARGETPLATFORM
 WORKDIR /usr/local
@@ -20,42 +21,19 @@ COPY dist/loongcollector-${VERSION}.linux-*.tar.gz .
 RUN tar -xzf loongcollector-${VERSION}.linux-${TARGETPLATFORM##*/}.tar.gz
 
 
-FROM centos:centos7.9.2009
-LABEL maintainer="TomYu <yyuuttaaoo@gmail.com>"
-
+FROM docker.io/bitnami/minideb:bookworm
+SHELL ["/bin/bash", "-c"]
 ENV container docker
-
-
-ARG TARGETPLATFORM
-
-RUN if [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
-        echo "Building for AMD64"; \
-        curl -L -o /etc/yum.repos.d/CentOS-Base.repo http://mirrors.aliyun.com/repo/Centos-7.repo; \
-    elif [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        echo "Building for ARM64"; \
-        curl -L -o /etc/yum.repos.d/CentOS-Base.repo http://mirrors.aliyun.com/repo/Centos-altarch-7.repo; \
-    else \
-        echo "Unsupported platform: $TARGETPLATFORM"; \
-        exit 1; \
-    fi
-
-
-RUN yum update -y && yum upgrade -y && yum -y clean all && rm -fr /var/cache && rm -rf /core.*
 
 ARG HOST_OS=Linux
 ARG VERSION=3.0.11
 ARG TARGETPLATFORM
 
-COPY --from=build /usr/local/loongcollector-${VERSION} /usr/local/loongcollector
-RUN chown -R $(whoami) /usr/local/loongcollector/ && \
-    chmod 755 /usr/local/loongcollector/loongcollector && \
-    mkdir -p /usr/local/loongcollector/data/checkpoint
+RUN mkdir -p /usr/local/loongcollector/{conf/instance_config/local,log,data/checkpoint,run}
+
+COPY --from=build --chmod=755 /usr/local/loongcollector-${VERSION} /usr/local/loongcollector
 
 WORKDIR /usr/local/loongcollector
-RUN mkdir -p /usr/local/loongcollector/conf/instance_config/local
-RUN mkdir -p /usr/local/loongcollector/log
-RUN mkdir -p /usr/local/loongcollector/data
-RUN mkdir -p /usr/local/loongcollector/run
 
 COPY example_config/start_with_docker/loongcollector_config.json /usr/local/loongcollector/conf/instance_config/local/loongcollector_config.json
 COPY scripts/loongcollector_control.sh /usr/local/loongcollector/

@@ -17,6 +17,7 @@ FROM sls-opensource-registry.cn-shanghai.cr.aliyuncs.com/loongcollector-communit
 USER root
 WORKDIR /src
 COPY . .
+RUN rm -rf /usr/local/go && tar -C /usr/local -xzf go/go1.24.4.linux-amd64.tar.gz
 
 ARG HOST_OS=Linux
 ARG VERSION=3.0.11

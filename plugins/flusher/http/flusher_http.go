@@ -20,22 +20,23 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"io"
+        "io"
+	"io/ioutil"
 	"math/big"
 	"net/http"
-	"net/url"
 	"sync"
 	"time"
 
 	"github.com/golang/snappy"
 
-	"github.com/alibaba/ilogtail/pkg/fmtstr"
 	"github.com/alibaba/ilogtail/pkg/helper"
+	"github.com/alibaba/ilogtail/pkg/fmtstr"
 	"github.com/alibaba/ilogtail/pkg/logger"
 	"github.com/alibaba/ilogtail/pkg/models"
 	"github.com/alibaba/ilogtail/pkg/pipeline"
-	"github.com/alibaba/ilogtail/pkg/pipeline/extensions"
 	"github.com/alibaba/ilogtail/pkg/protocol"
+        "github.com/alibaba/ilogtail/pkg/pipeline/extensions"
+
 	converter "github.com/alibaba/ilogtail/pkg/protocol/converter"
 )
 
@@ -66,12 +67,14 @@ type retryConfig struct {
 	MaxDelay      time.Duration // max delay time when retry, default is 30s
 }
 
+/*
 type Client interface {
 	Do(req *http.Request) (*http.Response, error)
 }
-
+*/
 type FlusherHTTP struct {
 	RemoteURL              string                       // RemoteURL to request
+	LogstoreUrl string               // Compatible with fast flusher
 	Headers                map[string]string            // Headers to append to the http request
 	Query                  map[string]string            // Query parameters to append to the http request
 	Timeout                time.Duration                // Request timeout, default is 60s
@@ -96,7 +99,7 @@ type FlusherHTTP struct {
 	context     pipeline.Context
 	encoder     extensions.Encoder
 	converter   *converter.Converter
-	client      Client
+	client      *http.Client
 	interceptor extensions.FlushInterceptor
 
 	queue   chan interface{}
@@ -127,6 +130,12 @@ func (f *FlusherHTTP) Description() string {
 }
 
 func (f *FlusherHTTP) Init(context pipeline.Context) error {
+
+	// compatible with fast flusher
+	if f.LogstoreUrl != "" {
+		f.RemoteURL = f.LogstoreUrl
+	}
+
 	f.context = context
 	logger.Info(f.context.GetRuntimeContext(), "http flusher init", "initializing")
 	if f.RemoteURL == "" {
@@ -152,25 +161,13 @@ func (f *FlusherHTTP) Init(context pipeline.Context) error {
 		return err
 	}
 
-	if f.FlushInterceptor != nil {
-		var ext pipeline.Extension
-		ext, err = f.context.GetExtension(f.FlushInterceptor.Type, f.FlushInterceptor.Options)
-		if err != nil {
-			logger.Error(f.context.GetRuntimeContext(), "FLUSHER_INIT_ALARM", "http flusher init filter fail, error", err)
-			return err
-		}
-		interceptor, ok := ext.(extensions.FlushInterceptor)
-		if !ok {
-			err = fmt.Errorf("filter(%s) not implement interface extensions.FlushInterceptor", f.FlushInterceptor)
-			logger.Error(f.context.GetRuntimeContext(), "FLUSHER_INIT_ALARM", "http flusher init filter fail, error", err)
-			return err
-		}
-		f.interceptor = interceptor
+	f.client = &http.Client{
+		Timeout: f.Timeout,
 	}
-
-	err = f.initHTTPClient()
-	if err != nil {
-		return err
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	if ok && f.Concurrency > transport.MaxIdleConnsPerHost {
+		transport.MaxIdleConnsPerHost = f.Concurrency + 1
+		f.client.Transport = transport
 	}
 
 	if f.QueueCapacity <= 0 {
@@ -224,11 +221,11 @@ func (f *FlusherHTTP) Stop() error {
 	close(f.queue)
 	return nil
 }
-
+/*
 func (f *FlusherHTTP) SetHTTPClient(client Client) {
 	f.client = client
 }
-
+*/
 func (f *FlusherHTTP) initEncoder() error {
 	if f.Encoder == nil {
 		return nil
@@ -269,7 +266,17 @@ func (f *FlusherHTTP) initConverter() error {
 }
 
 func (f *FlusherHTTP) getConverter() (*converter.Converter, error) {
-	return converter.NewConverterWithSep(f.Convert.Protocol, f.Convert.Encoding, f.Convert.Separator, f.Convert.IgnoreUnExpectedData, f.Convert.TagFieldsRename, f.Convert.ProtocolFieldsRename, f.context.GetPipelineScopeConfig())
+        return converter.NewConverterWithSep(
+                f.Convert.Protocol,
+                f.Convert.Encoding,
+                f.Convert.Separator,
+                f.Convert.IgnoreUnExpectedData,
+                nil,
+                nil,
+                f.Convert.ExternalKeyVal,
+                f.Convert.ExternalOverwritePolicy,
+                nil,
+        )
 }
 
 func (f *FlusherHTTP) initHTTPClient() error {
@@ -348,6 +355,7 @@ func (f *FlusherHTTP) initRequestInterceptors(transport http.RoundTripper) (http
 		}
 	}
 	return transport, nil
+
 }
 
 func (f *FlusherHTTP) addTask(log interface{}) {
@@ -441,6 +449,7 @@ func (f *FlusherHTTP) convertAndFlush(data interface{}) error {
 	case [][]byte:
 		for idx, data := range rows {
 			body, values := data, varValues[idx]
+			logger.Info(f.context.GetRuntimeContext(), string(data))
 			err = f.flushWithRetry(body, values)
 			if err != nil {
 				logger.Error(f.context.GetRuntimeContext(), "FLUSHER_FLUSH_ALARM", "http flusher failed flush data after retry, data dropped, error", err)
@@ -448,6 +457,7 @@ func (f *FlusherHTTP) convertAndFlush(data interface{}) error {
 		}
 		return nil
 	case []byte:
+		logger.Info(f.context.GetRuntimeContext(), string(rows))
 		err = f.flushWithRetry(rows, nil)
 		if err != nil {
 			logger.Error(f.context.GetRuntimeContext(), "FLUSHER_FLUSH_ALARM", "http flusher failed flush data after retry, error", err)
@@ -465,7 +475,6 @@ func (f *FlusherHTTP) flushWithRetry(data []byte, varValues map[string]string) e
 	for i := 0; i <= f.Retry.MaxRetryTimes; i++ {
 		ok, retryable, e := f.flush(data, varValues)
 		if ok || !retryable || !f.Retry.Enable {
-			err = e
 			break
 		}
 		err = e
@@ -515,6 +524,9 @@ func (f *FlusherHTTP) compressData(data []byte) (io.Reader, error) {
 }
 
 func (f *FlusherHTTP) flush(data []byte, varValues map[string]string) (ok, retryable bool, err error) {
+
+     //logger.Info(f.context.GetRuntimeContext(),varValues)
+     //logger.Info(f.context.GetRuntimeContext(),f)
 	reader, err := f.compressData(data)
 	if err != nil {
 		logger.Error(f.context.GetRuntimeContext(), "FLUSHER_FLUSH_ALARM", "create reader error", err)
@@ -527,7 +539,7 @@ func (f *FlusherHTTP) flush(data []byte, varValues map[string]string) (ok, retry
 		return false, false, err
 	}
 
-	if len(f.Query) > 0 {
+	if len(f.Query) > 0 && f.Convert.Protocol != converter.ProtocolFast {
 		values := req.URL.Query()
 		for k, v := range f.Query {
 			if len(f.varKeys) == 0 {
@@ -559,20 +571,24 @@ func (f *FlusherHTTP) flush(data []byte, varValues map[string]string) (ok, retry
 		}
 		req.Header.Add(k, v)
 	}
-	response, err := f.client.Do(req)
-	if logger.DebugFlag() {
-		logger.Debugf(f.context.GetRuntimeContext(), "request [method]: %v; [header]: %v; [url]: %v; [body]: %v", req.Method, req.Header, req.URL, string(data))
-	}
-	if err != nil {
-		urlErr, ok := err.(*url.Error)
-		retry := false
-		if ok && (urlErr.Timeout() || urlErr.Temporary()) {
-			retry = true
+
+	// set fast headers
+	if f.Convert.Protocol == converter.ProtocolFast {
+/*
+		for k, v := range varValues {
+			req.Header.Add(k, v)
 		}
-		logger.Error(f.context.GetRuntimeContext(), "FLUSHER_FLUSH_ALRAM", "http flusher send request fail, error", err)
-		return false, retry, err
+*/
+		req.Header.Add(converter.LogSource, converter.LogSourceContainer)
 	}
-	body, err := io.ReadAll(response.Body)
+
+	response, err := f.client.Do(req)
+	logger.Debugf(f.context.GetRuntimeContext(), "request [method]: %v; [header]: %v; [url]: %v; [body]: %v", req.Method, req.Header, req.URL, string(data))
+	if err != nil {
+		logger.Error(f.context.GetRuntimeContext(), "FLUSHER_FLUSH_ALRAM", "http flusher send request fail, error", err)
+		return false, false, err
+	}
+	body, err := ioutil.ReadAll(response.Body)
 	if err != nil {
 		logger.Error(f.context.GetRuntimeContext(), "FLUSHER_FLUSH_ALRAM", "http flusher read response fail, error", err)
 		return false, false, err
@@ -589,9 +605,6 @@ func (f *FlusherHTTP) flush(data []byte, varValues map[string]string) (ok, retry
 		logger.Error(f.context.GetRuntimeContext(), "FLUSHER_FLUSH_ALARM", "http flusher write data returned error, url", req.URL.String(), "status", response.Status, "body", string(body))
 		return false, true, fmt.Errorf("err status returned: %v", response.Status)
 	default:
-		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-			return false, true, fmt.Errorf("err status returned: %v", response.Status)
-		}
 		logger.Error(f.context.GetRuntimeContext(), "FLUSHER_FLUSH_ALARM", "http flusher write data returned error, url", req.URL.String(), "status", response.Status, "body", string(body))
 		return false, false, fmt.Errorf("unexpected status returned: %v", response.Status)
 	}
@@ -645,6 +658,20 @@ func (f *FlusherHTTP) fillRequestContentType() {
 
 func init() {
 	pipeline.Flushers["flusher_http"] = func() pipeline.Flusher {
-		return NewHTTPFlusher()
+		return &FlusherHTTP{
+			Timeout:     defaultTimeout,
+			Concurrency: 10,
+			Convert: helper.ConvertConfig{
+				Protocol:             converter.ProtocolFast,
+				Encoding:             converter.EncodingJSON,
+				IgnoreUnExpectedData: true,
+			},
+			Retry: retryConfig{
+				Enable:        true,
+				MaxRetryTimes: 3,
+				InitialDelay:  time.Second,
+				MaxDelay:      30 * time.Second,
+			},
+		}
 	}
 }

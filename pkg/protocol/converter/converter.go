@@ -32,6 +32,7 @@ const (
 	ProtocolInfluxdb            = "influxdb"
 	ProtocolJsonline            = "jsonline"
 	ProtocolRaw                 = "raw"
+	ProtocolFast         = "fast"
 )
 
 const (
@@ -118,6 +119,9 @@ var supportedEncodingMap = map[string]map[string]bool{
 	ProtocolRaw: {
 		EncodingCustom: true,
 	},
+	ProtocolFast: {
+		EncodingJSON: true,
+	},
 }
 
 type Converter struct {
@@ -128,16 +132,21 @@ type Converter struct {
 	OnlyContents         bool
 	TagKeyRenameMap      map[string]string
 	ProtocolKeyRenameMap map[string]string
+        ExternalKeyVal          map[string]interface{}
+        ExternalOverwritePolicy int
 	GlobalConfig         *config.GlobalConfig
 }
 
-func NewConverterWithSep(protocol, encoding, sep string, ignoreUnExpectedData bool, tagKeyRenameMap, protocolKeyRenameMap map[string]string, globalConfig *config.GlobalConfig) (*Converter, error) {
+func NewConverterWithSep(protocol, encoding, sep string, ignoreUnExpectedData bool, tagKeyRenameMap, protocolKeyRenameMap map[string]string, externalKeyVal map[string]interface{}, externalOverwritePolicy int, globalConfig *config.GlobalConfig) (*Converter, error) {
 	converter, err := NewConverter(protocol, encoding, tagKeyRenameMap, protocolKeyRenameMap, globalConfig)
 	if err != nil {
 		return nil, err
 	}
 	converter.Separator = sep
 	converter.IgnoreUnExpectedData = ignoreUnExpectedData
+        converter.ExternalKeyVal = externalKeyVal
+        converter.ExternalOverwritePolicy = externalOverwritePolicy
+
 	return converter, nil
 }
 
@@ -191,6 +200,8 @@ func (c *Converter) ToByteStreamWithSelectedFields(logGroup *protocol.LogGroup, 
 		return c.ConvertToInfluxdbProtocolStream(logGroup, targetFields)
 	case ProtocolJsonline:
 		return c.ConvertToJsonlineProtocolStreamFlatten(logGroup)
+	case ProtocolFast:
+		return c.ConvertToFastProtocolStream(logGroup, targetFields)
 	default:
 		return nil, nil, fmt.Errorf("unsupported protocol: %s", c.Protocol)
 	}

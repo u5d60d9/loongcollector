@@ -104,6 +104,7 @@ fi
 echo "=============DOCKERFILE=================="
 cat $GEN_DOCKERFILE
 echo "========================================="
+echo $CATEGORY
 
 if [[ $CATEGORY != "multi-arch-production" ]]; then
     docker build --build-arg TARGETPLATFORM=linux/$ARCH \
