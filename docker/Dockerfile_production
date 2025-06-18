@@ -29,9 +29,11 @@ ARG HOST_OS=Linux
 ARG VERSION=3.0.11
 ARG TARGETPLATFORM
 
-RUN mkdir -p /usr/local/loongcollector/{conf/instance_config/local,log,data/checkpoint,run}
+RUN mkdir -p /usr/local/loongcollector/{conf/{instance_config/local,continuous_pipeline_config/{common,common_v2}},log,data/checkpoint,run}
+RUN sed -i 's|\w\+.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list && \
+     apt-get update && apt-get install -y ca-certificates && apt-get -y clean && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build --chmod=755 /usr/local/loongcollector-${VERSION} /usr/local/loongcollector
+COPY --from=build --chown=0:0 --chmod=755 /usr/local/loongcollector-${VERSION} /usr/local/loongcollector
 
 WORKDIR /usr/local/loongcollector
 
