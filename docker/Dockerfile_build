@@ -13,11 +13,12 @@
 # limitations under the License.
 
 FROM sls-opensource-registry.cn-shanghai.cr.aliyuncs.com/loongcollector-community-edition/loongcollector-build-linux:2.1.4 AS build
+ARG TARGETARCH
 
 USER root
 WORKDIR /src
 COPY . .
-RUN rm -rf /usr/local/go && tar -C /usr/local -xzf go/go1.24.4.linux-amd64.tar.gz
+RUN rm -rf /usr/local/go && tar -C /usr/local -xzf go/go1.24.4.linux-$TARGETARCH.tar.gz
 
 ARG HOST_OS=Linux
 ARG VERSION=3.0.11
